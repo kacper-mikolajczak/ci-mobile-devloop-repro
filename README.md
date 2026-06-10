@@ -35,8 +35,9 @@ boot emulator                          (reactivecircus/android-emulator-runner)
   on Linux CI is unreliable without it).
 - **Metro is started App's way** (`npx rock start`), not the PR's
   `react-native start --config <wrapper>` (which only existed to silence LogBox).
-- **Verification is just two screenshots**, uploaded as a `devloop-evidence-*`
-  artifact. Eyeball `01-before.png` vs `02-after.png`.
+- **Verification is two-layered**: deterministic (the bundle Metro *serves* now
+  contains `CI-EDIT Phone or email`) plus visual (before/after screenshots),
+  uploaded as a `devloop-evidence-*` artifact.
 
 ## Files
 
@@ -63,14 +64,13 @@ Then download the `devloop-evidence-*` artifact and compare the two PNGs.
   short window right after a merge while the build is still publishing. If the
   job reports a cache MISS, re-run shortly or pin the App checkout to a slightly
   older commit (`ref:` on the App checkout step).
-- **Fast Refresh does not reliably propagate a translation-file edit.** Editing
-  `en.ts` produces no HMR delta (it is not a component boundary), so the loop
-  tries Fast Refresh first, then falls back to an **explicit reload** (force-stop
-  + relaunch) which re-pulls the bundle from Metro with the edit baked in - the
-  same effect as the melvin PR's `agent-device metro reload`. watchman is still
-  installed so Metro re-transforms the changed module on the re-request. The loop
-  polls the on-device UI (`uiautomator`) for the `CI-EDIT` token and fails if it
-  never renders.
+- **Fast Refresh does not propagate a translation-file edit** on CI (no HMR
+  delta for `en.ts`, and the long-running Metro watcher misses the change). The
+  loop tries Fast Refresh first, then **restarts Metro** so a fresh process
+  re-reads the edited file (its content-keyed transform cache only re-transforms
+  `en.ts`, so the restart is fast), and relaunches the app via `am start`. The
+  pass/fail gate is that Metro's served bundle now contains the edit; the
+  screenshot is best-effort because the emulator render can be slow/ANR-prone.
 - **Emulator on GitHub-hosted runners** needs KVM; the workflow enables it. The
   cold Metro bundle compile is slow (minutes) and memory-hungry (`NODE_OPTIONS`
   raises the heap to 8 GB).
