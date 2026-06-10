@@ -21,7 +21,7 @@ jobs:
   devloop:
     runs-on: ubuntu-latest
     # Emulator prep + cold Metro bundle compile need headroom; a warm run is faster.
-    timeout-minutes: 60
+    timeout-minutes: 40
     env:
       # App's Metro bundle is large; give the bundler heap headroom (RN OOMs at
       # ~4 GB serializing App's single bundle). ubuntu-latest has ~16 GB.
@@ -91,8 +91,9 @@ jobs:
             echo "::error::Re-run shortly, or pin the App checkout (ref:) to a slightly older built commit."
             exit 1
           fi
-          echo "APK_PATH=$GITHUB_WORKSPACE/$APK" >> "$GITHUB_ENV"
-          echo "Rock cache HIT: $APK"
+          # $APK is relative to App/ (we cd'd into it), so prefix App/ explicitly.
+          echo "APK_PATH=$GITHUB_WORKSPACE/App/$APK" >> "$GITHUB_ENV"
+          echo "Rock cache HIT: App/$APK"
 
       - name: Run the dev loop on the emulator
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
