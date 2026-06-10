@@ -1,0 +1,4 @@
+# CI-only working dirs
+App/
+artifacts/
+*.log

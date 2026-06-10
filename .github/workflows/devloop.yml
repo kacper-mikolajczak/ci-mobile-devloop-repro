@@ -1,0 +1,117 @@
+name: Mobile dev-loop repro
+
+# Minimal reproduction of the Android mobile dev-loop from
+# https://github.com/Expensify/melvin/pull/172, with melvin removed.
+#
+# Goal: prove the dev loop is feasible on CI. One job:
+#   1. Boot an Android emulator (reactivecircus/android-emulator-runner).
+#   2. Download the prebuilt developmentDebug APK from App's PUBLIC Rock S3
+#      cache (anonymous GET, no AWS creds, no PAT - App is public).
+#   3. Start Metro the App's way (`npx rock start`).
+#   4. Launch the app, screenshot the first (logged-out SignIn) screen,
+#      edit ONE visible source string, wait for Fast Refresh to propagate.
+#   5. Screenshot again. Upload before/after as the proof artifact.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  devloop:
+    runs-on: ubuntu-latest
+    # Emulator prep + cold Metro bundle compile need headroom; a warm run is faster.
+    timeout-minutes: 60
+    env:
+      # App's Metro bundle is large; give the bundler heap headroom (RN OOMs at
+      # ~4 GB serializing App's single bundle). ubuntu-latest has ~16 GB.
+      NODE_OPTIONS: '--max-old-space-size=8192'
+      # Standalone NewDot (not HybridApp); mirrors the melvin PR. Harmless for the
+      # Rock fingerprint (STANDALONE_NEW_DOT is not a fingerprint input).
+      STANDALONE_NEW_DOT: 'true'
+
+    steps:
+      - name: Checkout this repro repo
+        uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4
+
+      - name: Enable KVM (hardware-accelerated emulator)
+        # Without /dev/kvm the emulator falls back to TCG and the job times out.
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Checkout Expensify/App (public - no token)
+        uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4
+        with:
+          repository: Expensify/App
+          path: App
+
+      - name: Setup Node (App/.nvmrc)
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v4
+        with:
+          node-version-file: App/.nvmrc
+
+      - name: Cache App dependencies
+        id: cache-node-modules
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: App/node_modules
+          key: ${{ runner.os }}-app-node-modules-${{ hashFiles('App/package-lock.json', 'App/patches/**') }}
+
+      - name: Install App dependencies
+        if: steps.cache-node-modules.outputs.cache-hit != 'true'
+        # Lifecycle scripts ON: App's postinstall applies patches Metro needs.
+        env:
+          NPM_CONFIG_IGNORE_SCRIPTS: 'false'
+        run: cd App && npm ci
+
+      - name: Set up App .env
+        # Metro reads .env at transform time. The .env FILE contents do not affect
+        # the Rock fingerprint (that reads process.env), so this is safe to do
+        # before the cache download below.
+        run: |
+          cd App
+          cp .env.example .env
+          sed -i 's/USE_WEB_PROXY=false/USE_WEB_PROXY=true/' .env
+          sed -i 's/SKIP_ONBOARDING=false/SKIP_ONBOARDING=true/' .env
+
+      - name: Download prebuilt APK from PUBLIC Rock cache (fetch-only, fail-fast)
+        # The S3 bucket is public-read; anonymous GET works with no AWS creds.
+        # `|| true`: rock's exit code is unreliable, so we assert on the artifact.
+        # On a cache MISS we bail in seconds (we never build locally).
+        run: |
+          cd App
+          npx rock remote-cache download --platform android --traits developmentDebug || true
+          APK=$(ls .rock/cache/remote-build/rock-android-developmentDebug-*/*.apk 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            echo "::error::Rock cache MISS - no prebuilt developmentDebug APK for App's current fingerprint."
+            echo "::error::App main may have just merged (build still publishing) or its fingerprint changed."
+            echo "::error::Re-run shortly, or pin the App checkout (ref:) to a slightly older built commit."
+            exit 1
+          fi
+          echo "APK_PATH=$GITHUB_WORKSPACE/$APK" >> "$GITHUB_ENV"
+          echo "Rock cache HIT: $APK"
+
+      - name: Run the dev loop on the emulator
+        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          force-avd-creation: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          disable-animations: true
+          # Emulator is booted and adb is on PATH when this runs.
+          script: ./scripts/devloop.sh
+
+      - name: Upload before/after screenshots (proof)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: devloop-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
