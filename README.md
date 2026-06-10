@@ -17,7 +17,7 @@ boot emulator                          (reactivecircus/android-emulator-runner)
    -> install APK + adb reverse 8081
    -> launch app, screenshot           (01-before.png)
    -> edit ONE visible source string   (en.ts: "Phone or email")
-   -> wait for Fast Refresh
+   -> Fast Refresh, else explicit reload
    -> screenshot                       (02-after.png)
    -> upload before/after as artifact
 ```
@@ -63,10 +63,14 @@ Then download the `devloop-evidence-*` artifact and compare the two PNGs.
   short window right after a merge while the build is still publishing. If the
   job reports a cache MISS, re-run shortly or pin the App checkout to a slightly
   older commit (`ref:` on the App checkout step).
-- **Fast Refresh needs watchman on Linux.** Without it Metro misses the edit and
-  nothing propagates (the melvin PR's documented blocker). The workflow installs
-  watchman; the loop then polls the on-device UI (`uiautomator`) for the edited
-  `CI-EDIT` token rather than sleeping a fixed time, and fails if it never renders.
+- **Fast Refresh does not reliably propagate a translation-file edit.** Editing
+  `en.ts` produces no HMR delta (it is not a component boundary), so the loop
+  tries Fast Refresh first, then falls back to an **explicit reload** (force-stop
+  + relaunch) which re-pulls the bundle from Metro with the edit baked in - the
+  same effect as the melvin PR's `agent-device metro reload`. watchman is still
+  installed so Metro re-transforms the changed module on the re-request. The loop
+  polls the on-device UI (`uiautomator`) for the `CI-EDIT` token and fails if it
+  never renders.
 - **Emulator on GitHub-hosted runners** needs KVM; the workflow enables it. The
   cold Metro bundle compile is slow (minutes) and memory-hungry (`NODE_OPTIONS`
   raises the heap to 8 GB).

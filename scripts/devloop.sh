@@ -20,7 +20,8 @@ PKG="com.expensify.chat.dev"          # developmentDebug applicationId
 ACTIVITY="com.expensify.chat.MainActivity"
 METRO_READY_TIMEOUT=180               # wait for the packager
 SIGNIN_TIMEOUT=240                    # wait for the first screen (cold render)
-PROPAGATE_TIMEOUT=150                 # wait for Fast Refresh to render the edit
+FR_TIMEOUT=40                         # first try Fast Refresh (App's chosen mechanism)
+RELOAD_TIMEOUT=200                    # fallback: explicit reload re-pulls the bundle
 ORIG_LABEL="Phone or email"
 EDIT_TOKEN="CI-EDIT"                  # prefix added by edit-signin-label.sh
 
@@ -105,16 +106,28 @@ echo "==> Captured $ART/01-before.png"
 # 7. THE DEV-LOOP EDIT: change one visible source string on the first screen.
 "$ROOT/scripts/edit-signin-label.sh" "$APP"
 
-# 8. Wait for Fast Refresh to RENDER the edit: poll the UI for the edit token.
-#    With watchman installed (workflow step), Metro detects the file change and
-#    pushes the HMR update within seconds.
-echo "==> Waiting for Fast Refresh to render the edit (polling UI for '$EDIT_TOKEN', up to ${PROPAGATE_TIMEOUT}s)"
-if wait_for_ui "$EDIT_TOKEN" "$PROPAGATE_TIMEOUT"; then
-  PROPAGATED=1
-  echo "==> Edited label detected on screen"
+# 8. Propagate the edit to the running app.
+#    First try Fast Refresh (the chosen mechanism). App's translation edits do
+#    NOT reliably hot-swap via Fast Refresh (the en.ts module is not a component
+#    boundary, and no HMR delta is emitted), so if the label has not rendered in
+#    a short window we force an explicit reload: force-stop + relaunch makes the
+#    app re-pull the bundle from Metro with the edit baked in - the same effect
+#    as the melvin PR's `agent-device metro reload`.
+echo "==> Trying Fast Refresh first (polling UI for '$EDIT_TOKEN', up to ${FR_TIMEOUT}s)"
+if wait_for_ui "$EDIT_TOKEN" "$FR_TIMEOUT"; then
+  PROPAGATED=1; HOW="Fast Refresh"
 else
-  PROPAGATED=0
-  echo "::warning::edited label not detected within ${PROPAGATE_TIMEOUT}s"
+  echo "==> Fast Refresh did not render the edit; forcing an explicit reload (re-pull bundle)"
+  adb shell am force-stop "$PKG"
+  sleep 2
+  adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 \
+    || adb shell am start -n "$PKG/$ACTIVITY"
+  echo "==> Waiting for the reloaded screen to render the edit (up to ${RELOAD_TIMEOUT}s)"
+  if wait_for_ui "$EDIT_TOKEN" "$RELOAD_TIMEOUT"; then
+    PROPAGATED=1; HOW="explicit reload (force-stop + relaunch)"
+  else
+    PROPAGATED=0; HOW="none"
+  fi
 fi
 sleep 2
 adb exec-out screencap -p > "$ART/02-after.png"
@@ -123,8 +136,8 @@ echo "==> Captured $ART/02-after.png"
 # 9. Verify: the edited string must be rendered on the device.
 echo "==> Verifying the edit propagated"
 if [ "${PROPAGATED:-0}" = "1" ]; then
-  echo "SUCCESS: '${EDIT_TOKEN} ${ORIG_LABEL}' is rendered on the device - the JS edit propagated via Fast Refresh."
+  echo "SUCCESS: '${EDIT_TOKEN} ${ORIG_LABEL}' is rendered on the device via ${HOW} - the JS edit propagated to the running app."
 else
-  echo "::error::The edit did NOT render within ${PROPAGATE_TIMEOUT}s. Inspect $ART/02-after.png and $ART/metro.log."
+  echo "::error::The edit did NOT render (tried Fast Refresh ${FR_TIMEOUT}s + explicit reload ${RELOAD_TIMEOUT}s). Inspect $ART/02-after.png and $ART/metro.log."
   exit 1
 fi
