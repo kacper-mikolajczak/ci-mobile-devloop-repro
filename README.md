@@ -31,6 +31,8 @@ boot emulator                          (reactivecircus/android-emulator-runner)
   never built. On a cache miss the job fails fast in seconds.
 - **No Mapbox SDK token.** That token is only needed to *build* native; we only
   *bundle JS*, and `@rnmapbox/maps` JS is already in `node_modules`.
+- **watchman is installed** so Metro's file watcher detects the edit (Fast Refresh
+  on Linux CI is unreliable without it).
 - **Metro is started App's way** (`npx rock start`), not the PR's
   `react-native start --config <wrapper>` (which only existed to silence LogBox).
 - **Verification is just two screenshots**, uploaded as a `devloop-evidence-*`
@@ -61,10 +63,10 @@ Then download the `devloop-evidence-*` artifact and compare the two PNGs.
   short window right after a merge while the build is still publishing. If the
   job reports a cache MISS, re-run shortly or pin the App checkout to a slightly
   older commit (`ref:` on the App checkout step).
-- **Fast Refresh on a translation file.** This edits `en.ts` and relies on Fast
-  Refresh re-rendering the tree. If `01-before.png` and `02-after.png` come back
-  identical, switch `edit-signin-label.sh` to edit a component's rendered text
-  directly, or force an explicit reload via adb.
+- **Fast Refresh needs watchman on Linux.** Without it Metro misses the edit and
+  nothing propagates (the melvin PR's documented blocker). The workflow installs
+  watchman; the loop then polls the on-device UI (`uiautomator`) for the edited
+  `CI-EDIT` token rather than sleeping a fixed time, and fails if it never renders.
 - **Emulator on GitHub-hosted runners** needs KVM; the workflow enables it. The
   cold Metro bundle compile is slow (minutes) and memory-hungry (`NODE_OPTIONS`
   raises the heap to 8 GB).

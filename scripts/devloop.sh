@@ -2,8 +2,13 @@
 # The actual dev loop, run INSIDE reactivecircus/android-emulator-runner:
 # the emulator is already booted and `adb` is on PATH. cwd is the repo root.
 #
-#   start Metro (App's way) -> install APK -> launch app -> screenshot ->
-#   edit one visible source string -> wait for Fast Refresh -> screenshot.
+#   start Metro (App's way) -> install APK -> launch app ->
+#   wait for the SignIn screen -> screenshot -> edit one visible source
+#   string -> wait for Fast Refresh to render it -> screenshot.
+#
+# Readiness/propagation are detected by polling the on-device UI hierarchy
+# (uiautomator), not by fixed sleeps: the cold first render is slow and
+# variable, so we wait for the actual screen text instead of guessing.
 #
 # APK_PATH is exported by the "Download prebuilt APK" workflow step.
 set -euo pipefail
@@ -13,15 +18,45 @@ APP="$ROOT/App"
 ART="$ROOT/artifacts"
 PKG="com.expensify.chat.dev"          # developmentDebug applicationId
 ACTIVITY="com.expensify.chat.MainActivity"
-METRO_READY_TIMEOUT=180               # seconds to wait for the packager
-FAST_REFRESH_WAIT=45                  # seconds to let the edit propagate
+METRO_READY_TIMEOUT=180               # wait for the packager
+SIGNIN_TIMEOUT=240                    # wait for the first screen (cold render)
+PROPAGATE_TIMEOUT=150                 # wait for Fast Refresh to render the edit
+ORIG_LABEL="Phone or email"
+EDIT_TOKEN="CI-EDIT"                  # prefix added by edit-signin-label.sh
 
 mkdir -p "$ART"
 
+# Kill Metro on exit. A lingering `rock start` (node) process outliving the
+# script is what hangs reactivecircus's emulator teardown until the job timeout,
+# so we always stop it - even on failure.
+cleanup() {
+  echo "==> cleanup: stopping Metro"
+  pkill -f "react-native start" 2>/dev/null || true
+  pkill -f "rock start"         2>/dev/null || true
+  pkill -f "metro"              2>/dev/null || true
+}
+trap cleanup EXIT
+
+# Best-effort dump of the current on-device UI hierarchy as XML.
+dump_ui() {
+  adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1 || true
+  adb exec-out cat /sdcard/ui.xml 2>/dev/null || true
+}
+
+# Poll the UI for a literal string. $1=needle $2=timeout_s. 0=found, 1=timeout.
+wait_for_ui() {
+  local needle="$1" timeout="$2" deadline=$((SECONDS + $2))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if dump_ui | grep -qF "$needle"; then return 0; fi
+    sleep 5
+  done
+  return 1
+}
+
 # 1. Start Metro the App's way: `npm start` == `npx rock start`. Backgrounded;
-#    logs go to an artifact so a failure is debuggable. We deliberately do NOT
-#    use the melvin PR's `react-native start --config <wrapper>` - that only
-#    existed to silence LogBox; here we want App's vanilla bundler.
+#    logs to an artifact. We deliberately do NOT use the melvin PR's
+#    `react-native start --config <wrapper>` (that only silenced LogBox); here we
+#    want App's vanilla bundler.
 echo "==> Starting Metro (App's way: npx rock start)"
 ( cd "$APP" && nohup npx rock start > "$ART/metro.log" 2>&1 & )
 
@@ -55,27 +90,41 @@ echo "==> Launching $PKG"
 adb shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 \
   || adb shell am start -n "$PKG/$ACTIVITY"
 
-# 6. Let the first (logged-out SignIn) screen render, then screenshot BEFORE.
-echo "==> Waiting for the first screen to render"
-sleep 45
+# 6. Wait for the SignIn screen (poll for the "Continue" button text), then
+#    screenshot BEFORE - it must show the ORIGINAL "Phone or email" label.
+echo "==> Waiting for the SignIn screen (up to ${SIGNIN_TIMEOUT}s)"
+if wait_for_ui "Continue" "$SIGNIN_TIMEOUT"; then
+  echo "==> SignIn screen is up"
+else
+  echo "::warning::SignIn screen not detected via uiautomator in ${SIGNIN_TIMEOUT}s; capturing anyway"
+fi
+sleep 3
 adb exec-out screencap -p > "$ART/01-before.png"
 echo "==> Captured $ART/01-before.png"
 
 # 7. THE DEV-LOOP EDIT: change one visible source string on the first screen.
 "$ROOT/scripts/edit-signin-label.sh" "$APP"
 
-# 8. Wait for Fast Refresh to push the edit to the running app (spec point 4).
-echo "==> Waiting ${FAST_REFRESH_WAIT}s for Fast Refresh to propagate the edit"
-sleep "$FAST_REFRESH_WAIT"
+# 8. Wait for Fast Refresh to RENDER the edit: poll the UI for the edit token.
+#    With watchman installed (workflow step), Metro detects the file change and
+#    pushes the HMR update within seconds.
+echo "==> Waiting for Fast Refresh to render the edit (polling UI for '$EDIT_TOKEN', up to ${PROPAGATE_TIMEOUT}s)"
+if wait_for_ui "$EDIT_TOKEN" "$PROPAGATE_TIMEOUT"; then
+  PROPAGATED=1
+  echo "==> Edited label detected on screen"
+else
+  PROPAGATED=0
+  echo "::warning::edited label not detected within ${PROPAGATE_TIMEOUT}s"
+fi
+sleep 2
 adb exec-out screencap -p > "$ART/02-after.png"
 echo "==> Captured $ART/02-after.png"
 
-# 9. Simplest possible verification: the screenshots must differ. The real proof
-#    is eyeballing the uploaded before/after PNGs.
+# 9. Verify: the edited string must be rendered on the device.
 echo "==> Verifying the edit propagated"
-if cmp -s "$ART/01-before.png" "$ART/02-after.png"; then
-  echo "::warning::before/after screenshots are IDENTICAL - Fast Refresh may not have propagated."
-  echo "::warning::Inspect $ART/metro.log and the uploaded screenshots."
+if [ "${PROPAGATED:-0}" = "1" ]; then
+  echo "SUCCESS: '${EDIT_TOKEN} ${ORIG_LABEL}' is rendered on the device - the JS edit propagated via Fast Refresh."
 else
-  echo "SUCCESS: screenshots differ - the source edit propagated to the running app via Fast Refresh."
+  echo "::error::The edit did NOT render within ${PROPAGATE_TIMEOUT}s. Inspect $ART/02-after.png and $ART/metro.log."
+  exit 1
 fi

@@ -95,6 +95,28 @@ jobs:
           echo "APK_PATH=$GITHUB_WORKSPACE/App/$APK" >> "$GITHUB_ENV"
           echo "Rock cache HIT: App/$APK"
 
+      - name: Install watchman (Metro file watcher - required for Fast Refresh on Linux)
+        # Without watchman on PATH, Metro falls back to an inotify watcher that
+        # misses edits on CI, so JS edits never propagate (the melvin PR hit this
+        # exact iteration-loop blocker). Install Meta's pinned prebuilt release.
+        env:
+          WATCHMAN_VERSION: 'v2026.05.11.00'
+        run: |
+          set -euo pipefail
+          if command -v watchman >/dev/null 2>&1; then echo "watchman present: $(watchman --version)"; exit 0; fi
+          cd /tmp
+          ZIP="watchman-${WATCHMAN_VERSION}-linux.zip"
+          curl -fsSL -o "$ZIP" "https://github.com/facebook/watchman/releases/download/${WATCHMAN_VERSION}/${ZIP}"
+          unzip -q "$ZIP"
+          DIR="watchman-${WATCHMAN_VERSION}-linux"
+          sudo mkdir -p /usr/local/bin /usr/local/lib
+          sudo cp "$DIR/bin/"* /usr/local/bin/
+          sudo cp "$DIR/lib/"* /usr/local/lib/ || true
+          sudo chmod 755 /usr/local/bin/watchman*
+          sudo mkdir -p /usr/local/var/run/watchman
+          sudo chmod 2777 /usr/local/var/run/watchman
+          watchman --version
+
       - name: Run the dev loop on the emulator
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
